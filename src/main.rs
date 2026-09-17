@@ -40,6 +40,16 @@ struct Cli {
     #[arg(long)]
     keystore_password: String,
 
+    /// Path to a complete, real `nifi.properties` file for the target NiFi
+    /// version (e.g. generated once by a real `tls-toolkit.sh` run, or
+    /// copied from an existing installation's conf/nifi.properties). Each
+    /// host's output nifi.properties is this template with the 7 security
+    /// keys merged in; every other line is kept byte-for-byte identical.
+    /// There is no default or embedded template — the correct one depends
+    /// on the target NiFi version, so the caller must always supply it.
+    #[arg(long)]
+    base_properties: PathBuf,
+
     /// Regenerate a node's keystore/truststore/properties even if they already exist.
     #[arg(long)]
     force: bool,
@@ -57,6 +67,13 @@ fn run() -> Result<()> {
 
     let dn_template = DnTemplate::parse(&cli.dn)?;
 
+    let base_properties = std::fs::read_to_string(&cli.base_properties).with_context(|| {
+        format!(
+            "failed to read --base-properties template {:?}",
+            cli.base_properties
+        )
+    })?;
+
     std::fs::create_dir_all(&cli.out_dir)
         .with_context(|| format!("failed to create output directory {:?}", cli.out_dir))?;
 
@@ -72,7 +89,7 @@ fn run() -> Result<()> {
         if host.is_empty() {
             continue;
         }
-        process_host(host, &ca_cert_der, &issuer, &dn_template, &cli)?;
+        process_host(host, &ca_cert_der, &issuer, &dn_template, &base_properties, &cli)?;
     }
 
     Ok(())
@@ -83,6 +100,7 @@ fn process_host(
     ca_cert_der: &[u8],
     issuer: &Issuer<'_, rcgen::KeyPair>,
     dn_template: &DnTemplate,
+    base_properties: &str,
     cli: &Cli,
 ) -> Result<()> {
     let host_dir = cli.out_dir.join(host);
@@ -124,8 +142,12 @@ fn process_host(
     )
     .with_context(|| format!("{host}: failed to write truststore"))?;
 
-    properties::write_properties(&cli.keystore_password, &host_dir.join("nifi.properties"))
-        .with_context(|| format!("{host}: failed to write nifi.properties"))?;
+    properties::write_properties(
+        base_properties,
+        &cli.keystore_password,
+        &host_dir.join("nifi.properties"),
+    )
+    .with_context(|| format!("{host}: failed to write nifi.properties"))?;
 
     println!("{host}: OK -> {}", host_dir.display());
     Ok(())

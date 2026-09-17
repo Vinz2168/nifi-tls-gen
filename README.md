@@ -2,10 +2,10 @@
 
 Generates the certificate material Apache NiFi's `tls-toolkit.sh standalone`
 would generate — a CA, and per-node PKCS12 keystores + JKS truststores +
-a minimal `nifi.properties` — without needing a JVM at generation time. NiFi
-itself still runs on Java on the target nodes; only the *generation* step
-runs JVM-free, which is what makes this usable inside a JVM-less Ansible
-Execution Environment container.
+a `nifi.properties` with the security properties filled in — without needing
+a JVM at generation time. NiFi itself still runs on Java on the target nodes;
+only the *generation* step runs JVM-free, which is what makes this usable
+inside a JVM-less Ansible Execution Environment container.
 
 ## CLI
 
@@ -16,6 +16,7 @@ nifi-tls-gen \
   --ca-name <CA common name, e.g. ca.nifi> \
   --out-dir <output directory> \
   --keystore-password <password> \
+  --base-properties <path to a template nifi.properties> \
   [--force]
 ```
 
@@ -26,6 +27,7 @@ nifi-tls-gen \
 | `--ca-name`            | yes      | Common Name for the CA certificate (and the alias used for it in every truststore). |
 | `--out-dir`            | yes      | Output directory (created if missing). |
 | `--keystore-password`  | yes      | Shared password for the keystore, the private key inside it, and the truststore. |
+| `--base-properties`    | yes      | Path to a complete, real `nifi.properties` file for the target NiFi version. See [nifi.properties generation](#nifiproperties-generation) below. |
 | `--force`              | no       | Regenerate a node's `keystore.p12`/`truststore.jks`/`nifi.properties` even if `keystore.p12` already exists. |
 
 ### Example
@@ -36,7 +38,8 @@ nifi-tls-gen \
   --dn "CN=admin, OU=NIFI" \
   --ca-name ca.nifi \
   --out-dir ./tls \
-  --keystore-password changeit123
+  --keystore-password changeit123 \
+  --base-properties ./templates/nifi.properties.2.11.0
 ```
 
 ### Output structure
@@ -60,7 +63,23 @@ nifi-tls-gen \
     nifi.properties
 ```
 
-`nifi.properties` contains only:
+### `nifi.properties` generation
+
+> **Breaking change**: earlier versions of this tool wrote a minimal
+> `nifi.properties` from scratch, containing only the 7 security keys below
+> and nothing else. That behavior is gone. `--base-properties` is now
+> **required**, and each host's `nifi.properties` is that template merged
+> with the 7 security keys, not a from-scratch file.
+
+`--base-properties` must point to a complete, valid `nifi.properties` file
+for the target NiFi version — generate one once with a real
+`tls-toolkit.sh standalone` run, or copy `conf/nifi.properties` out of an
+existing NiFi installation of the same version, and check it into the
+consuming project's repo. There's no default or embedded template: the
+right one depends on the NiFi version, so the caller always supplies it
+explicitly.
+
+For each host, the tool reads that template and, for exactly these 7 keys:
 
 ```
 nifi.security.keystore=./keystore.p12
@@ -71,6 +90,21 @@ nifi.security.truststore=./truststore.jks
 nifi.security.truststoreType=JKS
 nifi.security.truststorePasswd=<password>
 ```
+
+rewrites the line in place if a `key=` line for it already exists anywhere
+in the template (whatever its current value), or appends a new `key=value`
+line at the end if it doesn't. **Every other line — every other property,
+every comment, every blank line — is preserved byte-for-byte and in its
+original order.** This is implemented as a line-level find/replace/append
+over the template's raw text (`src/properties.rs::merge`), deliberately not
+a generic `key=value` parser that could reorder or reformat things: this
+file gets diffed by administrators against the template, so preserving
+unrelated lines exactly is a hard requirement.
+
+If one of the 7 keys appears more than once in the template (not valid
+NiFi config, but handled defensively), only the first occurrence is
+rewritten; later ones are left untouched and a warning is printed to
+stderr.
 
 ### DN construction
 
@@ -222,6 +256,11 @@ cargo test --release
 ```
 
 - `src/dn.rs` unit tests cover `--dn` template parsing.
+- `src/properties.rs` unit tests cover the template-merge logic directly:
+  replacing all 7 keys in place (scattered through a template mixed with
+  comments/blanks/other properties) with no line-count change, appending
+  all 7 when none are present, leaving a duplicate key's second occurrence
+  untouched, and tolerating leading whitespace on a matched key.
 - `tests/integration.rs` drives the actual compiled binary end-to-end:
   - `keystores_validate_against_ca_with_openssl`: generates a CA + 2 hosts,
     shells out to `openssl pkcs12 -info` / `openssl verify` to confirm each
@@ -230,7 +269,17 @@ cargo test --release
   - `truststore_jks_is_readable_by_real_keytool`: confirms the hand-rolled
     JKS writer round-trips through a real JDK's `keytool -list`. Skips if no
     JDK is on `PATH`.
-  - `nifi_properties_has_expected_keys`: confirms `nifi.properties` has
-    exactly the expected `key=value` lines, unquoted, no surrounding
-    whitespace — matching the Ansible `regex_search('^nifi\.security\.keyPasswd=(.+)$',
-    multiline=True)` pattern that reads it back downstream.
+  - `nifi_properties_merges_into_base_template`: runs the CLI against a fake
+    template with some of the 7 keys already present and others missing,
+    and asserts the exact resulting line sequence — matched keys rewritten
+    in place, missing ones appended, everything else preserved verbatim, no
+    surrounding whitespace on any property line (needed by the Ansible
+    `regex_search('^nifi\.security\.keyPasswd=(.+)$', multiline=True)`
+    pattern that reads this file back downstream).
+  - `base_properties_flag_is_required`: confirms the CLI fails clearly when
+    `--base-properties` is omitted.
+
+  This was also checked against a real, complete 378-line
+  `nifi.properties` pulled from the `apache/nifi:2.11.0` Docker image: after
+  merging, `diff` against the original shows only the 7 targeted lines
+  changed, same line count, everything else untouched.

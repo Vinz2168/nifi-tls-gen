@@ -2,10 +2,28 @@
 //! way a user would, then check the results with independent tools
 //! (`openssl`, real JDK `keytool`) rather than re-parsing our own output.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-fn run_generator(out_dir: &Path, hostnames: &str) {
+/// A minimal stand-in for a real `nifi.properties` template, with a couple
+/// of unrelated properties, a comment, and a blank line, plus a couple of
+/// the 7 security keys already present (with stale values) to exercise the
+/// in-place merge through the CLI, not just `properties::merge` directly.
+const FAKE_TEMPLATE: &str = "\
+# fake nifi.properties template for tests
+nifi.flow.configuration.file=./conf/flow.json.gz
+
+nifi.security.keystoreType=JKS
+nifi.web.https.port=8443
+";
+
+fn write_fake_template(dir: &Path) -> PathBuf {
+    let path = dir.join("nifi.properties.template");
+    std::fs::write(&path, FAKE_TEMPLATE).unwrap();
+    path
+}
+
+fn run_generator(out_dir: &Path, hostnames: &str, base_properties: &Path) {
     let status = Command::new(env!("CARGO_BIN_EXE_nifi-tls-gen"))
         .args([
             "--hostnames",
@@ -17,7 +35,8 @@ fn run_generator(out_dir: &Path, hostnames: &str) {
             "--out-dir",
         ])
         .arg(out_dir)
-        .args(["--keystore-password", "changeit123"])
+        .args(["--keystore-password", "changeit123", "--base-properties"])
+        .arg(base_properties)
         .status()
         .expect("failed to run nifi-tls-gen binary");
     assert!(status.success(), "nifi-tls-gen exited with {status}");
@@ -42,7 +61,8 @@ fn keystores_validate_against_ca_with_openssl() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    run_generator(dir.path(), "hosta.example.com,hostb.example.com");
+    let template = write_fake_template(dir.path());
+    run_generator(dir.path(), "hosta.example.com,hostb.example.com", &template);
 
     let ca_crt = dir.path().join("ca/ca.crt");
     assert!(ca_crt.exists());
@@ -106,7 +126,8 @@ fn truststore_jks_is_readable_by_real_keytool() {
     }
 
     let dir = tempfile::tempdir().unwrap();
-    run_generator(dir.path(), "hostc.example.com");
+    let template = write_fake_template(dir.path());
+    run_generator(dir.path(), "hostc.example.com", &template);
 
     let truststore = dir.path().join("hostc.example.com/truststore.jks");
     assert!(truststore.exists());
@@ -133,39 +154,74 @@ fn truststore_jks_is_readable_by_real_keytool() {
     );
 }
 
-/// (c) Verifies nifi.properties contains exactly the expected keys with
-/// matching values, in the plain `key=value` form Ansible's regex_search
-/// reads back.
+/// (c) Verifies nifi.properties is the base template with the 7 security
+/// keys merged in: correct values, and every other template line preserved
+/// byte-for-byte and in order (one already present and rewritten, JKS ->
+/// PKCS12; the other 6 appended at the end since FAKE_TEMPLATE doesn't have
+/// them).
 #[test]
-fn nifi_properties_has_expected_keys() {
+fn nifi_properties_merges_into_base_template() {
     let dir = tempfile::tempdir().unwrap();
-    run_generator(dir.path(), "hostd.example.com");
+    let template = write_fake_template(dir.path());
+    run_generator(dir.path(), "hostd.example.com", &template);
 
     let contents =
         std::fs::read_to_string(dir.path().join("hostd.example.com/nifi.properties")).unwrap();
+    let lines: Vec<&str> = contents.lines().collect();
 
-    let expected = [
-        ("nifi.security.keystore", "./keystore.p12"),
-        ("nifi.security.keystoreType", "PKCS12"),
-        ("nifi.security.keystorePasswd", "changeit123"),
-        ("nifi.security.keyPasswd", "changeit123"),
-        ("nifi.security.truststore", "./truststore.jks"),
-        ("nifi.security.truststoreType", "JKS"),
-        ("nifi.security.truststorePasswd", "changeit123"),
-    ];
-
-    for (key, value) in expected {
-        let needle = format!("{key}={value}");
-        assert!(
-            contents.lines().any(|line| line == needle),
-            "expected line {needle:?} in nifi.properties, got:\n{contents}"
-        );
-    }
+    assert_eq!(
+        lines,
+        vec![
+            "# fake nifi.properties template for tests",
+            "nifi.flow.configuration.file=./conf/flow.json.gz",
+            "",
+            "nifi.security.keystoreType=PKCS12",
+            "nifi.web.https.port=8443",
+            "nifi.security.keystore=./keystore.p12",
+            "nifi.security.keystorePasswd=changeit123",
+            "nifi.security.keyPasswd=changeit123",
+            "nifi.security.truststore=./truststore.jks",
+            "nifi.security.truststoreType=JKS",
+            "nifi.security.truststorePasswd=changeit123",
+        ],
+        "unexpected merged nifi.properties:\n{contents}"
+    );
 
     // regex_search with '^nifi\.security\.keyPasswd=(.+)$' in multiline mode
     // needs each property on its own line with no surrounding whitespace.
-    for line in contents.lines() {
-        assert_eq!(line.trim(), line, "line has surrounding whitespace: {line:?}");
+    for line in &lines {
+        assert_eq!(line.trim(), *line, "line has surrounding whitespace: {line:?}");
         assert!(!line.contains('"'), "line should not be quoted: {line:?}");
     }
+}
+
+/// `--base-properties` is required: no embedded/default template, since the
+/// correct one depends on the target NiFi version.
+#[test]
+fn base_properties_flag_is_required() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_nifi-tls-gen"))
+        .args([
+            "--hostnames",
+            "hoste.example.com",
+            "--dn",
+            "OU=NIFI",
+            "--ca-name",
+            "ca.nifi",
+            "--out-dir",
+        ])
+        .arg(dir.path())
+        .args(["--keystore-password", "changeit123"])
+        .output()
+        .expect("failed to run nifi-tls-gen binary");
+
+    assert!(
+        !output.status.success(),
+        "expected failure when --base-properties is omitted"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("base-properties") || stderr.contains("base_properties"),
+        "expected the error to mention the missing --base-properties flag, got:\n{stderr}"
+    );
 }
