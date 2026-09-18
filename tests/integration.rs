@@ -225,3 +225,56 @@ fn base_properties_flag_is_required() {
         "expected the error to mention the missing --base-properties flag, got:\n{stderr}"
     );
 }
+
+/// The tls-toolkit-compatible flag names/short forms
+/// (`-n`/`--hostnames`, `--nifiDnSuffix`, `-c`/`--certificateAuthorityHostname`,
+/// `-o`/`--outputDirectory`, `-S`/`--keyStorePassword`,
+/// `-f`/`--nifiPropertiesFile`, `-O`/`--isOverwrite`) are accepted and behave
+/// exactly like their canonical counterparts — same generated output, and
+/// `-O` triggers regeneration of an already-existing host the same way
+/// `--force` does.
+#[test]
+fn tls_toolkit_compatible_aliases_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let template = write_fake_template(dir.path());
+
+    let status = Command::new(env!("CARGO_BIN_EXE_nifi-tls-gen"))
+        .args(["-n", "hostf.example.com"])
+        .args(["--nifiDnSuffix", "OU=NIFI"])
+        .args(["-c", "ca.nifi"])
+        .arg("-o")
+        .arg(dir.path())
+        .args(["-S", "changeit123"])
+        .arg("-f")
+        .arg(&template)
+        .status()
+        .expect("failed to run nifi-tls-gen binary with tls-toolkit-style aliases");
+    assert!(status.success(), "nifi-tls-gen exited with {status}");
+
+    let keystore = dir.path().join("hostf.example.com/keystore.p12");
+    assert!(keystore.exists(), "aliased flags did not generate a keystore");
+    let bytes_before = std::fs::read(&keystore).unwrap();
+
+    // -O is the tls-toolkit alias for --force / --isOverwrite: rerunning
+    // without it should skip, rerunning with it should regenerate (each
+    // generated key is random, so the resulting keystore bytes differ).
+    let status = Command::new(env!("CARGO_BIN_EXE_nifi-tls-gen"))
+        .args(["-n", "hostf.example.com"])
+        .args(["--nifiDnSuffix", "OU=NIFI"])
+        .args(["-c", "ca.nifi"])
+        .arg("-o")
+        .arg(dir.path())
+        .args(["-S", "changeit123"])
+        .arg("-f")
+        .arg(&template)
+        .arg("-O")
+        .status()
+        .expect("failed to run nifi-tls-gen binary with -O");
+    assert!(status.success());
+
+    let bytes_after = std::fs::read(&keystore).unwrap();
+    assert_ne!(
+        bytes_before, bytes_after,
+        "-O (--isOverwrite alias) should have regenerated the keystore"
+    );
+}

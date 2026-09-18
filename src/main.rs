@@ -19,25 +19,44 @@ use std::path::PathBuf;
 #[command(name = "nifi-tls-gen")]
 struct Cli {
     /// Comma-separated list of hostnames or IPs to issue node certificates for.
-    #[arg(long, value_delimiter = ',', required = true)]
+    ///
+    /// Same flag name and short form as tls-toolkit's `-n`/`--hostnames`.
+    #[arg(long, short = 'n', value_delimiter = ',', required = true)]
     hostnames: Vec<String>,
 
     /// DN template, e.g. "CN=admin" or "CN=nifi-registry-admin, OU=NIFI". The
     /// CN is ignored (each certificate gets its own CN); any other RDNs
     /// (O, OU, L, ST, C) are reused on every certificate this tool issues.
-    #[arg(long)]
+    ///
+    /// Plays the same role as tls-toolkit's `--nifiDnSuffix` (accepted here
+    /// as an alias): the non-CN part of the DN, reused for every
+    /// certificate. tls-toolkit's separate `--nifiDnPrefix` isn't supported
+    /// — this tool always uses a literal `CN=` prefix.
+    #[arg(long, visible_alias = "nifiDnSuffix")]
     dn: String,
 
     /// Common Name for the CA certificate.
-    #[arg(long)]
+    ///
+    /// Same role as tls-toolkit's `-c`/`--certificateAuthorityHostname`
+    /// (accepted here as an alias).
+    #[arg(long, short = 'c', visible_alias = "certificateAuthorityHostname")]
     ca_name: String,
 
     /// Directory to write ca/ and one directory per hostname into.
-    #[arg(long)]
+    ///
+    /// Same flag as tls-toolkit's `-o`/`--outputDirectory` (accepted here as
+    /// an alias).
+    #[arg(long, short = 'o', visible_alias = "outputDirectory")]
     out_dir: PathBuf,
 
     /// Password shared by the keystore, the key inside it, and the truststore.
-    #[arg(long)]
+    ///
+    /// Same role as tls-toolkit's `-S`/`--keyStorePassword` (accepted here
+    /// as an alias). Unlike tls-toolkit, this tool always uses one shared
+    /// password for the keystore, its key, and the truststore — there's no
+    /// equivalent of tls-toolkit's separate `-K`/`--keyPassword` or
+    /// `-P`/`--trustStorePassword`.
+    #[arg(long, short = 'S', visible_alias = "keyStorePassword")]
     keystore_password: String,
 
     /// Path to a complete, real `nifi.properties` file for the target NiFi
@@ -47,11 +66,18 @@ struct Cli {
     /// keys merged in; every other line is kept byte-for-byte identical.
     /// There is no default or embedded template — the correct one depends
     /// on the target NiFi version, so the caller must always supply it.
-    #[arg(long)]
+    ///
+    /// Same flag as tls-toolkit's `-f`/`--nifiPropertiesFile` (accepted here
+    /// as an alias), except that flag is optional upstream (an embedded
+    /// template is used if omitted) and is required here.
+    #[arg(long, short = 'f', visible_alias = "nifiPropertiesFile")]
     base_properties: PathBuf,
 
     /// Regenerate a node's keystore/truststore/properties even if they already exist.
-    #[arg(long)]
+    ///
+    /// Same flag as tls-toolkit's `-O`/`--isOverwrite` (accepted here as an
+    /// alias).
+    #[arg(long, short = 'O', visible_alias = "isOverwrite")]
     force: bool,
 }
 

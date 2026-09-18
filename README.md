@@ -20,15 +20,46 @@ nifi-tls-gen \
   [--force]
 ```
 
-| Flag                  | Required | Meaning                                                                                                    |
-|------------------------|:--------:|-------------------------------------------------------------------------------------------------------------|
-| `--hostnames`          | yes      | Comma-separated hostnames or IP addresses; one node cert is issued per entry.                               |
-| `--dn`                 | yes      | DN template. Its `CN` is ignored — every certificate gets an explicit `CN` (see below) — and any other RDNs (`O`, `OU`, `L`, `ST`, `C`) are kept and reused on every certificate issued. |
-| `--ca-name`            | yes      | Common Name for the CA certificate (and the alias used for it in every truststore). |
-| `--out-dir`            | yes      | Output directory (created if missing). |
-| `--keystore-password`  | yes      | Shared password for the keystore, the private key inside it, and the truststore. |
-| `--base-properties`    | yes      | Path to a complete, real `nifi.properties` file for the target NiFi version. See [nifi.properties generation](#nifiproperties-generation) below. |
-| `--force`              | no       | Regenerate a node's `keystore.p12`/`truststore.jks`/`nifi.properties` even if `keystore.p12` already exists. |
+| Flag                  | Short | tls-toolkit alias | Required | Meaning                                                                                                    |
+|------------------------|:---:|-----------------------------|:--------:|-------------------------------------------------------------------------------------------------------------|
+| `--hostnames`          | `-n` | `--hostnames` | yes      | Comma-separated hostnames or IP addresses; one node cert is issued per entry.                               |
+| `--dn`                 | | `--nifiDnSuffix` | yes      | DN template. Its `CN` is ignored — every certificate gets an explicit `CN` (see below) — and any other RDNs (`O`, `OU`, `L`, `ST`, `C`) are kept and reused on every certificate issued. |
+| `--ca-name`            | `-c` | `--certificateAuthorityHostname` | yes      | Common Name for the CA certificate (and the alias used for it in every truststore). |
+| `--out-dir`            | `-o` | `--outputDirectory` | yes      | Output directory (created if missing). |
+| `--keystore-password`  | `-S` | `--keyStorePassword` | yes      | Shared password for the keystore, the private key inside it, and the truststore. |
+| `--base-properties`    | `-f` | `--nifiPropertiesFile` | yes      | Path to a complete, real `nifi.properties` file for the target NiFi version. See [nifi.properties generation](#nifiproperties-generation) below. |
+| `--force`              | `-O` | `--isOverwrite` | no       | Regenerate a node's `keystore.p12`/`truststore.jks`/`nifi.properties` even if `keystore.p12` already exists. |
+
+### tls-toolkit CLI compatibility
+
+The short flags and the "tls-toolkit alias" long names above are accepted
+as exact synonyms for their `nifi-tls-gen` counterparts — same flag,
+same behavior — for anyone whose fingers already know `tls-toolkit.sh
+standalone`'s options (from `TlsToolkitStandaloneCommandLine`/
+`BaseTlsToolkitCommandLine` in NiFi's own — now removed — `nifi-toolkit-tls`
+module). This is **compatibility for existing functionality only, not new
+functionality**: only flags this tool already implements got an alias.
+tls-toolkit options with no equivalent here are deliberately **not**
+accepted at all, so a typo doesn't silently do something unexpected:
+
+- `-K`/`--keyPassword`, `-P`/`--trustStorePassword` — this tool always uses
+  one shared password (`--keystore-password`/`-S`) for the keystore, its
+  key, and the truststore; there's no per-store password.
+- `-T`/`--keyStoreType`, `-a`/`--keyAlgorithm`, `-k`/`--keySize`,
+  `-s`/`--signingAlgorithm`, `-d`/`--days` — always PKCS12 keystore / JKS
+  truststore, RSA-2048, SHA256withRSA, 10-year validity; not configurable.
+- `--nifiDnPrefix` — the CN prefix is always the literal `CN=`.
+- `-C`/`--clientCertDn`, `-B`/`--clientCertPassword`,
+  `-G`/`--globalPortSequence`, `--subjectAlternativeNames`,
+  `--additionalCACertificate`, `--splitKeystore`, `-g`/
+  `--differentKeyAndKeystorePasswords` — no equivalent feature.
+- `-f`/`--nifiPropertiesFile` is **required** here (no embedded default
+  template — see below), where it's optional upstream.
+
+(As of NiFi 2.x, `tls-toolkit.sh` itself no longer ships at all — the
+`nifi-toolkit-tls` module was removed from NiFi's `main` branch and only
+exists on the legacy `support/nifi-1.x` branch — which is the whole reason
+this tool exists.)
 
 ### Example
 
@@ -224,30 +255,46 @@ cargo build --release
 
 Produces `target/release/nifi-tls-gen`.
 
-### musl / minimal-container builds
+### musl / minimal-container builds (x86_64 Linux)
 
 Nothing in the dependency tree links against system OpenSSL — certificate
 crypto is `ring` (which officially supports musl targets, including
 `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl`) plus the
-pure-Rust `rsa`/`p12` crates. A static musl binary should build with:
+pure-Rust `rsa`/`p12` crates. On Linux, a static musl binary builds with:
 
 ```sh
 rustup target add x86_64-unknown-linux-musl
 cargo build --release --target x86_64-unknown-linux-musl
 ```
 
-or, cross-compiling from a non-Linux host, with
-[`cross`](https://github.com/cross-rs/cross):
+**Cross-compiling from macOS** (or any non-Linux host): rustup's musl target
+needs a musl C toolchain to build `ring`'s few C/assembly files, which isn't
+available outside Linux. The reliable way is building inside a Linux
+container — critically, an **x86_64** one, not whatever the host's native
+arch is, since `ring`'s C code is architecture-specific
+(cross-arch-in-container silently fails with a confusing
+`cc1: error: unrecognized command-line option '-m64'` from a mismatched
+`musl-gcc` if you don't pin the platform):
 
 ```sh
-cross build --release --target x86_64-unknown-linux-musl
+docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work rust:latest bash -c '
+  apt-get update -qq && apt-get install -y -qq musl-tools musl-dev
+  rustup target add x86_64-unknown-linux-musl
+  cargo build --release --target x86_64-unknown-linux-musl
+'
 ```
 
-This wasn't exercised in this environment (no musl cross-toolchain or
-running Docker daemon was available here) — if `rustup target add` +
-`cargo build --target x86_64-unknown-linux-musl` fails in your environment,
-fall back to a regular `x86_64-unknown-linux-gnu` build and ensure `libc`
-is present in the container, which every mainstream base image has anyway.
+Produces `target/x86_64-unknown-linux-musl/release/nifi-tls-gen` — a static
+`ELF 64-bit ... x86-64 ... static-pie linked` binary. This was verified by
+actually running that binary (not just compiling it) inside two separate
+minimal `--platform linux/amd64` containers with nothing else installed:
+`alpine:3.20` (musl libc) and `debian:12-slim` (glibc) — both ran it and
+produced correct output with zero extra runtime dependencies, which is the
+target scenario (a JVM-less Ansible Execution Environment container).
+
+If cross-compiling like this fails in your environment, fall back to a
+regular `x86_64-unknown-linux-gnu` build and ensure `libc` is present in the
+container, which every mainstream base image has anyway.
 
 ## Testing
 
@@ -278,6 +325,10 @@ cargo test --release
     pattern that reads this file back downstream).
   - `base_properties_flag_is_required`: confirms the CLI fails clearly when
     `--base-properties` is omitted.
+  - `tls_toolkit_compatible_aliases_work`: runs the binary using only
+    tls-toolkit's flag names/short forms (`-n`, `--nifiDnSuffix`, `-c`,
+    `-o`, `-S`, `-f`, `-O`) and confirms they behave exactly like the
+    canonical flags, including `-O` regenerating an existing host.
 
   This was also checked against a real, complete 378-line
   `nifi.properties` pulled from the `apache/nifi:2.11.0` Docker image: after
